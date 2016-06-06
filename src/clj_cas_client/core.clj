@@ -1,4 +1,3 @@
-
 (ns clj-cas-client.core
   (:use ring.util.response)
   (:require [clojure.tools.logging :as log]
@@ -6,7 +5,7 @@
   (:import (org.jasig.cas.client.validation Cas10TicketValidator
                                             TicketValidationException)))
 (def artifact-parameter-name "ticket")
-(def const-cas-assertion     "_const_cas_assertion_")
+(def const-cas-principal "_const_cas_principal_")
 
 (defprotocol Validator
   (validate [v ticket service]))
@@ -19,10 +18,13 @@
   (Cas10TicketValidator. (cas-server-fn)))
 
 (defn- valid? [request]
-  (or (get-in request [:session const-cas-assertion])
-      (get-in request [:session (keyword const-cas-assertion)])
+  (or (get-in request [:session const-cas-principal])
+      (get-in request [:session (keyword const-cas-principal)])
       (get-in request [:query-params artifact-parameter-name])
       (get-in request [:query-params (keyword artifact-parameter-name)])))
+
+(defn assertion->principal [assertion]
+  (.getName (.getPrincipal assertion)))
 
 (defn authentication-filter
   [handler cas-server-fn service-fn no-redirect?]
@@ -33,11 +35,13 @@
         {:status 403}
         (redirect (str (cas-server-fn) "/login?service=" (service-fn)))))))
 
-(defn session-assertion [res assertion]
-  (assoc-in res [:session const-cas-assertion] assertion))
+(defn session-principal [res assertion]
+  (let [s (assertion->principal assertion)]
+    (assoc-in res [:session const-cas-principal] s)))
 
-(defn request-assertion [req assertion]
-  (update-in req [:query-params] assoc const-cas-assertion assertion))
+(defn request-principal [req assertion]
+  (let [s (assertion->principal assertion)]
+    (update-in req [:query-params] assoc const-cas-principal s)))
 
 (defn ticket [r] (or (get-in r [:query-params artifact-parameter-name])
                      (get-in r [:query-params (keyword artifact-parameter-name)])))
@@ -49,7 +53,7 @@
         (if-let [t (ticket request)]
           (try
             (let [assertion (validate ticket-validator t (service-fn))]
-              (session-assertion (handler (request-assertion request assertion)) assertion))
+              (session-principal (handler (request-principal request assertion)) assertion))
             (catch TicketValidationException e
               (log/error "Ticket validation exception " e)
               {:status 403}))
@@ -59,11 +63,11 @@
 
 (defn user-principal-filter [handler]
   (fn [request]
-    (if-let [assertion (or (get-in request [:query-params const-cas-assertion])
-                           (get-in request [:query-params (keyword const-cas-assertion)])
-                           (get-in request [:session const-cas-assertion])
-                           (get-in request [:session (keyword const-cas-assertion)]))]
-      (handler (assoc request :username (.getName (.getPrincipal assertion))))
+    (if-let [principal (or (get-in request [:query-params const-cas-principal])
+                           (get-in request [:query-params (keyword const-cas-principal)])
+                           (get-in request [:session const-cas-principal])
+                           (get-in request [:session (keyword const-cas-principal)]))]
+      (handler (assoc request :username principal))
       (handler request))))
 
 (defn cas
@@ -83,8 +87,8 @@
                        options)]
     (if (:enabled options)
       (-> handler
-        user-principal-filter
-        (authentication-filter cas-server-fn service-fn (:no-redirect? options))
-        (ticket-validation-filter cas-server-fn service-fn)
-        wrap-params)
+          user-principal-filter
+          (authentication-filter cas-server-fn service-fn (:no-redirect? options))
+          (ticket-validation-filter cas-server-fn service-fn)
+          wrap-params)
       handler)))
